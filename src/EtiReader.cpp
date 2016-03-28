@@ -30,11 +30,12 @@
 #include "TimestampDecoder.h"
 
 #include <stdexcept>
+#include <memory>
 #include <sys/types.h>
 #include <string.h>
 #include <arpa/inet.h>
 
-using namespace boost;
+using namespace std;
 
 enum ETI_READER_STATE {
     EtiReaderStateNbFrame,
@@ -51,30 +52,22 @@ enum ETI_READER_STATE {
 };
 
 
-EtiReader::EtiReader(struct modulator_offset_config& modconf,
-        Logger& logger) :
-    myLogger(logger),
+EtiReader::EtiReader(
+        double& tist_offset_s,
+        unsigned tist_delay_stages,
+        RemoteControllers* rcs) :
     state(EtiReaderStateSync),
-    myFicSource(NULL),
-    myTimestampDecoder(modconf, myLogger)
+    myTimestampDecoder(tist_offset_s, tist_delay_stages)
 {
     PDEBUG("EtiReader::EtiReader()\n");
+
+    myTimestampDecoder.enrol_at(*rcs);
 
     myCurrentFrame = 0;
     eti_fc_valid = false;
 }
 
-EtiReader::~EtiReader()
-{
-    PDEBUG("EtiReader::~EtiReader()\n");
-
-//    if (myFicSource != NULL) {
-//        delete myFicSource;
-//    }
-}
-
-
-FicSource* EtiReader::getFic()
+std::shared_ptr<FicSource>& EtiReader::getFic()
 {
     return myFicSource;
 }
@@ -98,7 +91,7 @@ unsigned EtiReader::getFp()
 }
 
 
-const std::vector<boost::shared_ptr<SubchannelSource> >& EtiReader::getSubchannels()
+const std::vector<std::shared_ptr<SubchannelSource> >& EtiReader::getSubchannels()
 {
     return mySources;
 }
@@ -165,8 +158,8 @@ int EtiReader::process(const Buffer* dataIn)
             if (!eti_fc.FICF) {
                 throw std::runtime_error("FIC must be present to modulate!");
             }
-            if (myFicSource == NULL) {
-                myFicSource = new FicSource(eti_fc);
+            if (not myFicSource) {
+                myFicSource = make_shared<FicSource>(eti_fc);
             }
             break;
         case EtiReaderStateNst:
@@ -285,11 +278,6 @@ int EtiReader::process(const Buffer* dataIn)
     // Update timestamps
     myTimestampDecoder.updateTimestampEti(eti_fc.FP & 0x3,
             eti_eoh.MNSC, getPPSOffset(), eti_fc.FCT);
-
-    if (eti_fc.FCT % 125 == 0) //every 3 seconds is fine enough
-    {
-        myTimestampDecoder.updateModulatorOffset();
-    }
 
     return dataIn->getLength() - input_size;
 }

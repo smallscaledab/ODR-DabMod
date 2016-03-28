@@ -19,7 +19,7 @@
 # along with ODR-DabMod.  If not, see <http://www.gnu.org/licenses/>.
 
 AC_PREREQ(2.59)
-AC_INIT([ODR-DabMod], [0.5.2], [matthias.braendli@mpb.li])
+AC_INIT([ODR-DabMod], [0.5.5], [matthias.braendli@mpb.li])
 AC_CONFIG_AUX_DIR([build-aux])
 AC_CONFIG_MACRO_DIR([m4])
 AC_CANONICAL_SYSTEM
@@ -47,6 +47,8 @@ AC_PROG_INSTALL
 AC_PROG_CPP
 AC_PROG_MKDIR_P
 
+AX_CXX_COMPILE_STDCXX_11(noext,mandatory)
+
 EXTRA=""
 AC_ARG_ENABLE([debug],
         [AS_HELP_STRING([--enable-debug], [Enable debugger symbols])],
@@ -73,7 +75,8 @@ AC_ARG_ENABLE([kiss_fft],
 
 # ZeroMQ message queue input
 AC_ARG_ENABLE([zeromq],
-        AS_HELP_STRING([--enable-zeromq], [Enable ZeroMQ input, output and remote control]))
+        [AS_HELP_STRING([--disable-zeromq], [Disable ZeroMQ input, output and remote control])],
+        [], [enable_zeromq=yes])
 
 # UHD support control
 AC_ARG_ENABLE([output_uhd],
@@ -94,8 +97,8 @@ AS_IF([test "x$enable_zeromq" = "xyes"],
         [AC_DEFINE(HAVE_ZEROMQ, [1], [Define if ZeroMQ is enabled]) ,
          AC_CHECK_LIB(zmq, zmq_init, ZMQ_LIBS="-lzmq" ,[AC_MSG_ERROR([ZeroMQ libzmq is required])])])
 AS_IF([test "x$enable_debug" = "xno"],
-        [OPTIM="-O2" DEBUG="" EXTRA="$EXTRA -DNDEBUG"],
-        [OPTIM="-O0" DEBUG="-ggdb" EXTRA="$EXTRA"])
+        [EXTRA="$EXTRA -DNDEBUG"],
+        [EXTRA="$EXTRA"])
 AS_IF([test "x$enable_prof" != "xno"],
         [EXTRA="$EXTRA -pg"])
 
@@ -114,8 +117,8 @@ AS_IF([test "x$enable_fftw" = "xyes"],
 
 AX_PTHREAD([], AC_MSG_ERROR([requires pthread]))
 
-AC_SUBST([CFLAGS], ["$OPTIM $DEBUG $EXTRA $FFTW_CFLAGS $PTHREAD_CFLAGS"])
-AC_SUBST([CXXFLAGS], ["$OPTIM $DEBUG $EXTRA $FFTW_CFLAGS $PTHREAD_CFLAGS"])
+AC_SUBST([CFLAGS], ["$EXTRA $FFTW_CFLAGS $PTHREAD_CFLAGS"])
+AC_SUBST([CXXFLAGS], ["$CXXFLAGS $EXTRA $FFTW_CFLAGS $PTHREAD_CFLAGS"])
 AC_SUBST([LIBS], ["$FFTW_LIBS $PTHREAD_LIBS $ZMQ_LIBS"])
 
 # Checks for UHD.
@@ -164,21 +167,24 @@ AC_LANG_POP([C++])
 
 # Check for SSE
 AC_MSG_CHECKING(for SSE in current arch/CFLAGS)
-AC_LINK_IFELSE([
-AC_LANG_PROGRAM([[
+
+save_CXXFLAGS="$CXXFLAGS"
+CXXFLAGS="$CXXFLAGS -msse"
+AC_MSG_CHECKING([whether we need to add -msse])
+AC_COMPILE_IFELSE(  [AC_LANG_PROGRAM([[
 #include <xmmintrin.h>
 __m128 testfunc(float *a, float *b) {
   return _mm_add_ps(_mm_loadu_ps(a), _mm_loadu_ps(b));
 }
 ]])],
-[
-has_sse=yes
-],
-[
-has_sse=no
-]
+[has_sse=yes],
+[has_sse=no]
 )
 AC_MSG_RESULT($has_sse)
+if test x"$has_sse" = xno; then
+    CXXFLAGS="$save_CXXFLAGS"
+fi
+
 
 AM_CONDITIONAL([HAVE_SSE], [test "x$has_sse" = "xyes"])
 

@@ -46,8 +46,7 @@
 #include "FIRFilter.h"
 #include "RemoteControl.h"
 
-#include <boost/shared_ptr.hpp>
-#include <boost/make_shared.hpp>
+#include <memory>
 #include <boost/property_tree/ptree.hpp>
 #include <boost/property_tree/ini_parser.hpp>
 #include <complex>
@@ -70,12 +69,16 @@
 #   define memalign(a, b)   malloc(b)
 #endif
 
-#define ZMQ_INPUT_MAX_FRAME_QUEUE 50
+#define ZMQ_INPUT_MAX_FRAME_QUEUE 500
 
 
 typedef std::complex<float> complexf;
 
-using namespace boost;
+using namespace std;
+
+// We need global lifetime for the RemoteControllers because
+// some destructors of long lived objects use it.
+RemoteControllers rcs;
 
 volatile sig_atomic_t running = 1;
 
@@ -108,7 +111,7 @@ enum run_modulator_state {
     MOD_AGAIN
 };
 
-run_modulator_state run_modulator(Logger& logger, modulator_data& m);
+run_modulator_state run_modulator(modulator_data& m);
 
 int launch_modulator(int argc, char* argv[])
 {
@@ -130,8 +133,9 @@ int launch_modulator(int argc, char* argv[])
     unsigned dabMode = 0;
     float digitalgain = 1.0f;
     float normalise = 1.0f;
-    GainMode gainMode = GAIN_VAR;
+    GainMode gainMode = GainMode::GAIN_VAR;
 
+    tii_config_t tiiConfig;
 
     /* UHD requires the input I and Q samples to be in the interval
      * [-1.0,1.0], otherwise they get truncated, which creates very
@@ -157,24 +161,20 @@ int launch_modulator(int argc, char* argv[])
     modulator_data m;
 
     // To handle the timestamp offset of the modulator
-    struct modulator_offset_config modconf;
-    modconf.use_offset_file = false;
-    modconf.use_offset_fixed = false;
-    modconf.delay_calculation_pipeline_stages = 0;
+    unsigned tist_delay_stages = 0;
+    double   tist_offset_s = 0.0;
 
     shared_ptr<Flowgraph> flowgraph(new Flowgraph());
     shared_ptr<FormatConverter> format_converter;
     shared_ptr<ModOutput> output;
 
-    RemoteControllers rcs;
     m.rcs = &rcs;
 
     bool run_again = true;
 
-    Logger logger;
-    InputFileReader inputFileReader(logger);
+    InputFileReader inputFileReader;
 #if defined(HAVE_ZEROMQ)
-    shared_ptr<InputZeroMQReader> inputZeroMQReader(new InputZeroMQReader(logger));
+    shared_ptr<InputZeroMQReader> inputZeroMQReader(new InputZeroMQReader());
 #endif
 
     struct sigaction sa;
@@ -239,25 +239,7 @@ int launch_modulator(int argc, char* argv[])
             loop = true;
             break;
         case 'o':
-            if (modconf.use_offset_file)
-            {
-                fprintf(stderr, "Options -o and -O are mutually exclusive\n");
-                throw std::invalid_argument("Invalid command line options");
-            }
-            modconf.use_offset_fixed = true;
-            modconf.offset_fixed = strtod(optarg, NULL);
-#if defined(HAVE_OUTPUT_UHD)
-            outputuhd_conf.enableSync = true;
-#endif
-            break;
-        case 'O':
-            if (modconf.use_offset_fixed)
-            {
-                fprintf(stderr, "Options -o and -O are mutually exclusive\n");
-                throw std::invalid_argument("Invalid command line options");
-            }
-            modconf.use_offset_file = true;
-            modconf.offset_filename = std::string(optarg);
+            tist_offset_s = strtod(optarg, NULL);
 #if defined(HAVE_OUTPUT_UHD)
             outputuhd_conf.enableSync = true;
 #endif
@@ -278,6 +260,9 @@ int launch_modulator(int argc, char* argv[])
                 throw std::invalid_argument("Invalid command line options");
             }
             outputuhd_conf.device = optarg;
+            outputuhd_conf.refclk_src = "internal";
+            outputuhd_conf.pps_src = "none";
+            outputuhd_conf.pps_polarity = "pos";
             useUHDOutput = 1;
 #endif
             break;
@@ -402,7 +387,7 @@ int launch_modulator(int argc, char* argv[])
         // log parameters:
         if (pt.get("log.syslog", 0) == 1) {
             LogToSyslog* log_syslog = new LogToSyslog();
-            logger.register_backend(log_syslog);
+            etiLog.register_backend(log_syslog);
         }
 
         if (pt.get("log.filelog", 0) == 1) {
@@ -417,7 +402,7 @@ int launch_modulator(int argc, char* argv[])
             }
 
             LogToFile* log_file = new LogToFile(logfilename);
-            logger.register_backend(log_file);
+            etiLog.register_backend(log_file);
         }
 
 
@@ -542,8 +527,8 @@ int launch_modulator(int argc, char* argv[])
             }
 
 
-            outputuhd_conf.refclk_src = pt.get("uhdoutput.refclk_source", "int");
-            outputuhd_conf.pps_src = pt.get("uhdoutput.pps_source", "int");
+            outputuhd_conf.refclk_src = pt.get("uhdoutput.refclk_source", "internal");
+            outputuhd_conf.pps_src = pt.get("uhdoutput.pps_source", "none");
             outputuhd_conf.pps_polarity = pt.get("uhdoutput.pps_polarity", "pos");
 
             std::string behave = pt.get("uhdoutput.behaviour_refclk_lock_lost", "ignore");
@@ -558,6 +543,8 @@ int launch_modulator(int argc, char* argv[])
                 std::cerr << "Error: UHD output: behaviour_refclk_lock_lost invalid." << std::endl;
                 throw std::runtime_error("Configuration error");
             }
+
+            outputuhd_conf.maxGPSHoldoverTime = pt.get("uhdoutput.max_gps_holdover_time", 0);
 
             useUHDOutput = 1;
         }
@@ -577,49 +564,51 @@ int launch_modulator(int argc, char* argv[])
 #if defined(HAVE_OUTPUT_UHD)
         outputuhd_conf.enableSync = (pt.get("delaymanagement.synchronous", 0) == 1);
         if (outputuhd_conf.enableSync) {
+            std::string delay_mgmt = pt.get<std::string>("delaymanagement.management", "");
+            std::string fixedoffset = pt.get<std::string>("delaymanagement.fixedoffset", "");
+            std::string offset_filename = pt.get<std::string>("delaymanagement.dynamicoffsetfile", "");
+
+            if (not(delay_mgmt.empty() and fixedoffset.empty() and offset_filename.empty())) {
+                std::cerr << "Warning: you are using the old config syntax for the offset management.\n";
+                std::cerr << "         Please see the example.ini configuration for the new settings.\n";
+            }
+
             try {
-                std::string delay_mgmt = pt.get<std::string>("delaymanagement.management");
-                if (delay_mgmt == "fixed") {
-                    modconf.offset_fixed = pt.get<double>("delaymanagement.fixedoffset");
-                    modconf.use_offset_fixed = true;
-                }
-                else if (delay_mgmt == "dynamic") {
-                    modconf.offset_filename = pt.get<std::string>("delaymanagement.dynamicoffsetfile");
-                    modconf.use_offset_file = true;
-                }
-                else {
-                    throw std::runtime_error("invalid management value");
-                }
+                tist_offset_s = pt.get<double>("delaymanagement.offset");
             }
             catch (std::exception &e) {
-                std::cerr << "Error: " << e.what() << "\n";
-                std::cerr << "       Synchronised transmission enabled, but delay management specification is incomplete.\n";
+                std::cerr << "Error: delaymanagement: synchronous is enabled, but no offset defined!\n";
                 throw std::runtime_error("Configuration error");
             }
         }
 
         outputuhd_conf.muteNoTimestamps = (pt.get("delaymanagement.mutenotimestamps", 0) == 1);
 #endif
+
+        /* Read TII parameters from config file */
+        tiiConfig.enable  = pt.get("tii.enable", 0);
+        tiiConfig.comb    = pt.get("tii.comb", 0);
+        tiiConfig.pattern = pt.get("tii.pattern", 0);
     }
 
     if (rcs.get_no_controllers() == 0) {
-        logger.level(warn) << "No Remote-Control started";
+        etiLog.level(warn) << "No Remote-Control started";
         rcs.add_controller(new RemoteControllerDummy());
     }
 
 
-    logger.level(info) << "Starting up";
+    etiLog.level(info) << "Starting up version " <<
+#if defined(GITVERSION)
+            GITVERSION;
+#else
+            VERSION;
+#endif
 
-    if (!(modconf.use_offset_file || modconf.use_offset_fixed)) {
-        logger.level(debug) << "No Modulator offset defined, setting to 0";
-        modconf.use_offset_fixed = true;
-        modconf.offset_fixed = 0;
-    }
 
     // When using the FIRFilter, increase the modulator offset pipelining delay
     // by the correct amount
     if (filterTapsFilename != "") {
-        modconf.delay_calculation_pipeline_stages += FIRFILTER_PIPELINE_DELAY;
+        tist_delay_stages += FIRFILTER_PIPELINE_DELAY;
     }
 
     // Setting ETI input filename
@@ -647,12 +636,12 @@ int launch_modulator(int argc, char* argv[])
         fprintf(stderr, "\n");
         printUsage(argv[0]);
         ret = -1;
-        logger.level(error) << "Received invalid command line arguments";
+        etiLog.level(error) << "Received invalid command line arguments";
         throw std::invalid_argument("Invalid command line options");
     }
 
     if (!useFileOutput && !useUHDOutput && !useZeroMQOutput) {
-        logger.level(error) << "Output not specified";
+        etiLog.level(error) << "Output not specified";
         fprintf(stderr, "Must specify output !");
         throw std::runtime_error("Configuration error");
     }
@@ -671,10 +660,14 @@ int launch_modulator(int argc, char* argv[])
         fprintf(stderr, " UHD\n"
                         "  Device: %s\n"
                         "  Type: %s\n"
-                        "  master_clock_rate: %ld\n",
+                        "  master_clock_rate: %ld\n"
+                        "  refclk: %s\n"
+                        "  pps source: %s\n",
                 outputuhd_conf.device.c_str(),
                 outputuhd_conf.usrpType.c_str(),
-                outputuhd_conf.masterClockRate);
+                outputuhd_conf.masterClockRate,
+                outputuhd_conf.refclk_src.c_str(),
+                outputuhd_conf.pps_src.c_str());
     }
 #endif
     else if (useZeroMQOutput) {
@@ -700,7 +693,7 @@ int launch_modulator(int argc, char* argv[])
         // Opening ETI input file
         if (inputFileReader.Open(inputName, loop) == -1) {
             fprintf(stderr, "Unable to open input file!\n");
-            logger.level(error) << "Unable to open input file!";
+            etiLog.level(error) << "Unable to open input file!";
             ret = -1;
             throw std::runtime_error("Unable to open input");
         }
@@ -741,7 +734,7 @@ int launch_modulator(int argc, char* argv[])
     else if (useUHDOutput) {
         normalise = 1.0f / normalise_factor;
         outputuhd_conf.sampleRate = outputRate;
-        output = make_shared<OutputUHD>(outputuhd_conf, &logger);
+        output = make_shared<OutputUHD>(outputuhd_conf);
         ((OutputUHD*)output.get())->enrol_at(rcs);
     }
 #endif
@@ -772,8 +765,9 @@ int launch_modulator(int argc, char* argv[])
 
         shared_ptr<InputMemory> input(new InputMemory(&m.data));
         shared_ptr<DabModulator> modulator(
-                new DabModulator(modconf, &rcs, logger, outputRate, clockRate,
-                    dabMode, gainMode, digitalgain, normalise, filterTapsFilename));
+                new DabModulator(tist_offset_s, tist_delay_stages, &rcs,
+                    tiiConfig, outputRate, clockRate, dabMode, gainMode,
+                    digitalgain, normalise, filterTapsFilename));
 
         flowgraph.connect(input, modulator);
         if (format_converter) {
@@ -792,41 +786,47 @@ int launch_modulator(int argc, char* argv[])
 
         m.inputReader->PrintInfo();
 
-        run_modulator_state st = run_modulator(logger, m);
+        run_modulator_state st = run_modulator(m);
 
         switch (st) {
             case MOD_FAILURE:
-                fprintf(stderr, "\nModulator failure.\n");
+                etiLog.level(error) << "Modulator failure.";
                 run_again = false;
                 ret = 1;
                 break;
-#if defined(HAVE_ZEROMQ)
             case MOD_AGAIN:
-                fprintf(stderr, "\nRestart modulator\n");
-                running = true;
-                if (inputTransport == "zeromq") {
+                etiLog.level(warn) << "Restart modulator.";
+                run_again = false;
+                if (inputTransport == "file") {
+                    if (inputFileReader.Open(inputName, loop) == -1) {
+                        etiLog.level(error) << "Unable to open input file!";
+                        ret = 1;
+                    }
+                    else {
+                        run_again = true;
+                    }
+                }
+                else if (inputTransport == "zeromq") {
+#if defined(HAVE_ZEROMQ)
                     run_again = true;
-
                     // Create a new input reader
-                    inputZeroMQReader = make_shared<InputZeroMQReader>(logger);
+                    inputZeroMQReader = make_shared<InputZeroMQReader>();
                     inputZeroMQReader->Open(inputName, inputMaxFramesQueued);
                     m.inputReader = inputZeroMQReader.get();
+#endif
                 }
                 break;
-#endif
             case MOD_NORMAL_END:
             default:
-                fprintf(stderr, "\nModulator stopped.\n");
+                etiLog.level(info) << "modulator stopped.";
                 ret = 0;
                 run_again = false;
                 break;
         }
 
         fprintf(stderr, "\n\n");
-        fprintf(stderr, "%lu DAB frames encoded\n", m.framecount);
-        fprintf(stderr, "%f seconds encoded\n", (float)m.framecount * 0.024f);
-
-        fprintf(stderr, "\nCleaning flowgraph...\n");
+        etiLog.level(info) << m.framecount << " DAB frames encoded";
+        etiLog.level(info) << ((float)m.framecount * 0.024f) << " seconds encoded";
 
         m.data.setLength(0);
     }
@@ -835,11 +835,11 @@ int launch_modulator(int argc, char* argv[])
     // Cleaning things
     ////////////////////////////////////////////////////////////////////////
 
-    logger.level(info) << "Terminating";
+    etiLog.level(info) << "Terminating";
     return ret;
 }
 
-run_modulator_state run_modulator(Logger& logger, modulator_data& m)
+run_modulator_state run_modulator(modulator_data& m)
 {
     run_modulator_state ret = MOD_FAILURE;
     try {
@@ -873,10 +873,10 @@ run_modulator_state run_modulator(Logger& logger, modulator_data& m)
                 }
             }
             if (framesize == 0) {
-                logger.level(info) << "End of file reached.";
+                etiLog.level(info) << "End of file reached.";
             }
             else {
-                logger.level(error) << "Input read error.";
+                etiLog.level(error) << "Input read error.";
             }
             running = 0;
             ret = MOD_NORMAL_END;
@@ -884,15 +884,15 @@ run_modulator_state run_modulator(Logger& logger, modulator_data& m)
 #if defined(HAVE_OUTPUT_UHD)
     } catch (fct_discontinuity_error& e) {
         // The OutputUHD saw a FCT discontinuity
-        logger.level(warn) << e.what();
+        etiLog.level(warn) << e.what();
         ret = MOD_AGAIN;
 #endif
     } catch (zmq_input_overflow& e) {
         // The ZeroMQ input has overflowed its buffer
-        logger.level(warn) << e.what();
+        etiLog.level(warn) << e.what();
         ret = MOD_AGAIN;
     } catch (std::exception& e) {
-        logger.level(error) << "Exception caught: " << e.what();
+        etiLog.level(error) << "Exception caught: " << e.what();
         ret = MOD_FAILURE;
     }
 

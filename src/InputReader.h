@@ -31,6 +31,8 @@
 #endif
 
 #include <cstdio>
+#include <vector>
+#include <memory>
 #if defined(HAVE_ZEROMQ)
 #  include "zmq.hpp"
 #  include "ThreadsafeQueue.h"
@@ -85,9 +87,9 @@ class InputReader
 class InputFileReader : public InputReader
 {
     public:
-        InputFileReader(Logger logger) :
+        InputFileReader() :
             streamtype_(ETI_STREAM_TYPE_NONE),
-            inputfile_(NULL), logger_(logger) {};
+            inputfile_(NULL) { }
 
         ~InputFileReader()
         {
@@ -113,6 +115,9 @@ class InputFileReader : public InputReader
         }
 
     private:
+        InputFileReader(const InputFileReader& other);
+        InputFileReader& operator=(const InputFileReader& other);
+
         int IdentifyType();
 
         // Rewind the file, and replay anew
@@ -123,7 +128,6 @@ class InputFileReader : public InputReader
         std::string filename_;
         EtiStreamType streamtype_;
         FILE* inputfile_;
-        Logger logger_;
 
         size_t inputfilelength_;
         uint64_t nbframes_; // 64-bit because 32-bit overflow is
@@ -143,11 +147,9 @@ struct zmq_input_overflow : public std::exception
 
 struct InputZeroMQThreadData
 {
-    ThreadsafeQueue<uint8_t*> *in_messages;
+    ThreadsafeQueue<std::shared_ptr<std::vector<uint8_t> > > *in_messages;
     std::string uri;
     unsigned max_queued_frames;
-
-    bool running;
 };
 
 class InputZeroMQWorker
@@ -160,10 +162,13 @@ class InputZeroMQWorker
 
         void Start(struct InputZeroMQThreadData* workerdata);
         void Stop();
+
+        bool is_running(void) { return running; }
     private:
+        bool running;
+
         void RecvProcess(struct InputZeroMQThreadData* workerdata);
 
-        bool running;
         zmq::context_t zmqcontext; // is thread-safe
         boost::thread recv_thread;
 
@@ -179,11 +184,9 @@ class InputZeroMQWorker
 class InputZeroMQReader : public InputReader
 {
     public:
-        InputZeroMQReader(Logger logger) :
-            logger_(logger), in_messages_(10)
+        InputZeroMQReader()
         {
             workerdata_.in_messages = &in_messages_;
-            workerdata_.running     = false;
         }
 
         ~InputZeroMQReader()
@@ -198,12 +201,12 @@ class InputZeroMQReader : public InputReader
         void PrintInfo();
 
     private:
-        InputZeroMQReader(const InputZeroMQReader& other) {}
-        Logger logger_;
+        InputZeroMQReader(const InputZeroMQReader& other);
+        InputZeroMQReader& operator=(const InputZeroMQReader& other);
         std::string uri_;
 
         InputZeroMQWorker worker_;
-        ThreadsafeQueue<uint8_t*> in_messages_;
+        ThreadsafeQueue<std::shared_ptr<std::vector<uint8_t> > > in_messages_;
         struct InputZeroMQThreadData workerdata_;
 };
 

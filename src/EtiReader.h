@@ -39,23 +39,23 @@
 #include "TimestampDecoder.h"
 
 #include <vector>
+#include <memory>
 #include <stdint.h>
 #include <sys/types.h>
-#include <boost/shared_ptr.hpp>
 
 
 class EtiReader
 {
 public:
-    EtiReader(struct modulator_offset_config& modconf, Logger& logger);
-    virtual ~EtiReader();
-    EtiReader(const EtiReader&);
-    EtiReader& operator=(const EtiReader&);
+    EtiReader(
+            double& tist_offset_s,
+            unsigned tist_delay_stages,
+            RemoteControllers* rcs);
 
-    FicSource* getFic();
+    std::shared_ptr<FicSource>& getFic();
     unsigned getMode();
     unsigned getFp();
-    const std::vector<boost::shared_ptr<SubchannelSource> >& getSubchannels();
+    const std::vector<std::shared_ptr<SubchannelSource> >& getSubchannels();
     int process(const Buffer* dataIn);
 
     void calculateTimestamp(struct frame_timestamp& ts)
@@ -67,9 +67,6 @@ public:
     bool sourceContainsTimestamp();
 
 protected:
-    /* Main program logger */
-    Logger& myLogger;
-
     /* Transform the ETI TIST to a PPS offset in ms */
     double getPPSOffset();
 
@@ -83,14 +80,12 @@ protected:
     eti_EOH eti_eoh;
     eti_EOF eti_eof;
     eti_TIST eti_tist;
-    FicSource* myFicSource;
-    std::vector<boost::shared_ptr<SubchannelSource> > mySources;
+    std::shared_ptr<FicSource> myFicSource;
+    std::vector<std::shared_ptr<SubchannelSource> > mySources;
     TimestampDecoder myTimestampDecoder;
 
 private:
     size_t myCurrentFrame;
-    bool time_ext_enabled;
-    unsigned long timestamp_seconds;
     bool eti_fc_valid;
 };
 

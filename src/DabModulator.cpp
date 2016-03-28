@@ -26,6 +26,7 @@
  */
 
 #include <string>
+#include <memory>
 
 #include "DabModulator.h"
 #include "PcDebug.h"
@@ -46,34 +47,33 @@
 #include "Resampler.h"
 #include "ConvEncoder.h"
 #include "FIRFilter.h"
+#include "TII.h"
 #include "PuncturingEncoder.h"
 #include "TimeInterleaver.h"
 #include "TimestampDecoder.h"
 #include "RemoteControl.h"
 #include "Log.h"
 
-using namespace boost;
-
 DabModulator::DabModulator(
-        struct modulator_offset_config& modconf,
+        double& tist_offset_s, unsigned tist_delay_stages,
         RemoteControllers* rcs,
-        Logger& logger,
+        tii_config_t& tiiConfig,
         unsigned outputRate, unsigned clockRate,
         unsigned dabMode, GainMode gainMode,
-        float digGain, float normalise,
-        std::string filterTapsFilename
+        float& digGain, float normalise,
+        std::string& filterTapsFilename
         ) :
     ModCodec(ModFormat(1), ModFormat(0)),
-    myLogger(logger),
     myOutputRate(outputRate),
     myClockRate(clockRate),
     myDabMode(dabMode),
     myGainMode(gainMode),
     myDigGain(digGain),
     myNormalise(normalise),
-    myEtiReader(EtiReader(modconf, myLogger)),
+    myEtiReader(tist_offset_s, tist_delay_stages, rcs),
     myFlowgraph(NULL),
     myFilterTapsFilename(filterTapsFilename),
+    myTiiConfig(tiiConfig),
     myRCs(rcs)
 {
     PDEBUG("DabModulator::DabModulator(%u, %u, %u, %u) @ %p\n",
@@ -141,6 +141,8 @@ void DabModulator::setMode(unsigned mode)
 
 int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
 {
+    using namespace std;
+
     PDEBUG("DabModulator::process(dataIn: %p, dataOut: %p)\n",
             dataIn, dataOut);
 
@@ -196,6 +198,14 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
                 (float)mySpacing * (float)myOutputRate / 2048000.0f,
                 cic_ratio));
 
+        shared_ptr<TII> tii;
+        try {
+            tii = make_shared<TII>(myDabMode, myTiiConfig);
+            tii->enrol_at(*myRCs);
+        }
+        catch (TIIError& e) {
+            etiLog.level(error) << "Could not initialise TII: " << e.what();
+        }
 
         shared_ptr<OfdmGenerator> cifOfdm(
                 new OfdmGenerator((1 + myNbSymbols), myNbCarriers, mySpacing));
@@ -209,9 +219,9 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
                 new GuardIntervalInserter(myNbSymbols, mySpacing,
                 myNullSize, mySymSize));
 
-        FIRFilter* cifFilter = NULL;
+        shared_ptr<FIRFilter> cifFilter;
         if (myFilterTapsFilename != "") {
-            cifFilter = new FIRFilter(myFilterTapsFilename);
+            cifFilter = make_shared<FIRFilter>(myFilterTapsFilename);
             cifFilter->enrol_at(*myRCs);
         }
         shared_ptr<OutputMemory> myOutput(new OutputMemory(dataOut));
@@ -251,13 +261,11 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
 
         // Configuring puncturing encoder
         shared_ptr<PuncturingEncoder> ficPunc(new PuncturingEncoder());
-        std::vector<PuncturingRule*> rules = fic->get_rules();
-        std::vector<PuncturingRule*>::const_iterator rule;
-        for (rule = rules.begin(); rule != rules.end(); ++rule) {
+        for (const auto *rule : fic->get_rules()) {
             PDEBUG(" Adding rule:\n");
-            PDEBUG("  Length: %zu\n", (*rule)->length());
-            PDEBUG("  Pattern: 0x%x\n", (*rule)->pattern());
-            ficPunc->append_rule(*(*rule));
+            PDEBUG("  Length: %zu\n", rule->length());
+            PDEBUG("  Pattern: 0x%x\n", rule->pattern());
+            ficPunc->append_rule(*rule);
         }
         PDEBUG(" Adding tail\n");
         ficPunc->append_tail_rule(PuncturingRule(3, 0xcccccc));
@@ -272,16 +280,13 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
         ////////////////////////////////////////////////////////////////
         std::vector<shared_ptr<SubchannelSource> > subchannels =
             myEtiReader.getSubchannels();
-        std::vector<shared_ptr<SubchannelSource> >::const_iterator subchannel;
-        for (subchannel = subchannels.begin();
-                subchannel != subchannels.end();
-                ++subchannel) {
+        for (const auto& subchannel : subchannels) {
 
             ////////////////////////////////////////////////////////////
             // Data initialisation
             ////////////////////////////////////////////////////////////
-            size_t subchSizeIn = (*subchannel)->framesize();
-            size_t subchSizeOut = (*subchannel)->framesizeCu() * 8;
+            size_t subchSizeIn = subchannel->framesize();
+            size_t subchSizeOut = subchannel->framesizeCu() * 8;
 
             ////////////////////////////////////////////////////////////
             // Modules configuration
@@ -290,20 +295,20 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
             // Configuring subchannel
             PDEBUG("Subchannel:\n");
             PDEBUG(" Start address: %zu\n",
-                    (*subchannel)->startAddress());
+                    subchannel->startAddress());
             PDEBUG(" Framesize: %zu\n",
-                    (*subchannel)->framesize());
-            PDEBUG(" Bitrate: %zu\n", (*subchannel)->bitrate());
+                    subchannel->framesize());
+            PDEBUG(" Bitrate: %zu\n", subchannel->bitrate());
             PDEBUG(" Framesize CU: %zu\n",
-                    (*subchannel)->framesizeCu());
+                    subchannel->framesizeCu());
             PDEBUG(" Protection: %zu\n",
-                    (*subchannel)->protection());
+                    subchannel->protection());
             PDEBUG("  Form: %zu\n",
-                    (*subchannel)->protectionForm());
+                    subchannel->protectionForm());
             PDEBUG("  Level: %zu\n",
-                    (*subchannel)->protectionLevel());
+                    subchannel->protectionLevel());
             PDEBUG("  Option: %zu\n",
-                    (*subchannel)->protectionOption());
+                    subchannel->protectionOption());
 
             // Configuring prbs genrerator
             shared_ptr<PrbsGenerator> subchPrbs(
@@ -317,13 +322,11 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
             shared_ptr<PuncturingEncoder> subchPunc(
                     new PuncturingEncoder());
 
-            std::vector<PuncturingRule*> rules = (*subchannel)->get_rules();
-            std::vector<PuncturingRule*>::const_iterator rule;
-            for (rule = rules.begin(); rule != rules.end(); ++rule) {
+            for (const auto& rule : subchannel->get_rules()) {
                 PDEBUG(" Adding rule:\n");
-                PDEBUG("  Length: %zu\n", (*rule)->length());
-                PDEBUG("  Pattern: 0x%x\n", (*rule)->pattern());
-                subchPunc->append_rule(*(*rule));
+                PDEBUG("  Length: %zu\n", rule->length());
+                PDEBUG("  Pattern: 0x%x\n", rule->pattern());
+                subchPunc->append_rule(*rule);
             }
             PDEBUG(" Adding tail\n");
             subchPunc->append_tail_rule(PuncturingRule(3, 0xcccccc));
@@ -332,7 +335,7 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
             shared_ptr<TimeInterleaver> subchInterleaver(
                     new TimeInterleaver(subchSizeOut));
 
-            myFlowgraph->connect(*subchannel, subchPrbs);
+            myFlowgraph->connect(subchannel, subchPrbs);
             myFlowgraph->connect(subchPrbs, subchConv);
             myFlowgraph->connect(subchConv, subchPunc);
             myFlowgraph->connect(subchPunc, subchInterleaver);
@@ -346,6 +349,10 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
         myFlowgraph->connect(cifFreq, cifDiff);
         myFlowgraph->connect(cifNull, cifSig);
         myFlowgraph->connect(cifDiff, cifSig);
+        if (tii) {
+            myFlowgraph->connect(tii, cifSig);
+        }
+
         if (useCicEq) {
             myFlowgraph->connect(cifSig, cifCicEq);
             myFlowgraph->connect(cifCicEq, cifOfdm);
@@ -355,15 +362,14 @@ int DabModulator::process(Buffer* const dataIn, Buffer* dataOut)
         myFlowgraph->connect(cifOfdm, cifGain);
         myFlowgraph->connect(cifGain, cifGuard);
 
-        if (myFilterTapsFilename != "") {
-            shared_ptr<FIRFilter> cifFilterptr(cifFilter);
-            myFlowgraph->connect(cifGuard, cifFilterptr);
+        if (cifFilter) {
+            myFlowgraph->connect(cifGuard, cifFilter);
             if (cifRes != NULL) {
                 shared_ptr<Resampler> res(cifRes);
-                myFlowgraph->connect(cifFilterptr, res);
+                myFlowgraph->connect(cifFilter, res);
                 myFlowgraph->connect(res, myOutput);
             } else {
-                myFlowgraph->connect(cifFilterptr, myOutput);
+                myFlowgraph->connect(cifFilter, myOutput);
             }
         }
         else { //no filtering

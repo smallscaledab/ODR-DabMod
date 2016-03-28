@@ -26,15 +26,9 @@ ACLOCAL_AMFLAGS = -I m4
 EXTRA_DIST = COPYING NEWS README.md AUTHORS ChangeLog TODO doc
 
 if IS_GIT_REPO
-GITVERSION_FLAGS = -DGITVERSION="\"`git describe`\""
+GITVERSION_FLAGS = -DGITVERSION="\"`git describe --dirty`\""
 else
 GITVERSION_FLAGS =
-endif
-
-if HAVE_SSE
-SIMD_CFLAGS = -msse -msse2
-else
-SIMD_CFLAGS =
 endif
 
 bin_PROGRAMS = odr-dabmod
@@ -71,7 +65,7 @@ FFT_FLG=
 endif
 
 odr_dabmod_CPPFLAGS = -Wall -Isrc \
-					  $(FFT_INC) $(FFT_FLG) $(SIMD_CFLAGS) $(GITVERSION_FLAGS)
+					  $(FFT_INC) $(FFT_FLG) $(GITVERSION_FLAGS)
 odr_dabmod_LDADD    = $(FFT_LDADD)
 odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  src/PcDebug.h \
@@ -165,6 +159,8 @@ odr_dabmod_SOURCES  = src/DabMod.cpp \
 					  src/FormatConverter.h \
 					  src/Utils.cpp \
 					  src/Utils.h \
+					  src/TII.cpp \
+					  src/TII.h \
 					  src/zmq.hpp
 
 dist_bin_SCRIPTS = src/crc-dwap.py

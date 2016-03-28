@@ -2,7 +2,7 @@
    Copyright (C) 2005, 2006, 2007, 2008, 2009, 2010 Her Majesty the
    Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2014
+   Copyright (C) 2014, 2015
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -28,29 +28,14 @@
 #define TIMESTAMP_DECODER_H
 
 #include <queue>
+#include <memory>
 #include <string>
 #include <time.h>
 #include <math.h>
 #include <stdio.h>
 #include "Eti.h"
 #include "Log.h"
-
-struct modulator_offset_config
-{
-    bool use_offset_fixed;
-    double offset_fixed;
-    /* These two fields are used when the modulator is run with a fixed offset */
-
-    bool use_offset_file;
-    std::string offset_filename;
-    /* These two fields are used when the modulator reads the offset from a file */
-
-    unsigned delay_calculation_pipeline_stages;
-    /* Specifies by how many stages the timestamp must be delayed.
-     * (e.g. The FIRFilter is pipelined, therefore we must increase 
-     * delay_calculation_pipeline_stages by one if the filter is used
-     */
-};
+#include "RemoteControl.h"
 
 struct frame_timestamp
 {
@@ -109,14 +94,24 @@ struct frame_timestamp
 };
 
 /* This module decodes MNSC time information */
-class TimestampDecoder
+class TimestampDecoder : public RemoteControllable
 {
     public:
         TimestampDecoder(
-                struct modulator_offset_config& config,
-                Logger& logger):
-            myLogger(logger), modconfig(config)
+                /* The modulator adds this offset to the TIST to define time of
+                 * frame transmission
+                 */
+                double& offset_s,
+
+                /* Specifies by how many stages the timestamp must be delayed.
+                 * (e.g. The FIRFilter is pipelined, therefore we must increase
+                 * tist_delay_stages by one if the filter is used
+                 */
+                unsigned tist_delay_stages) :
+            RemoteControllable("tist"),
+            timestamp_offset(offset_s)
         {
+            m_tist_delay_stages = tist_delay_stages;
             inhibit_second_update = 0;
             time_pps = 0.0;
             time_secs = 0;
@@ -126,10 +121,10 @@ class TimestampDecoder
             gmtime_r(0, &temp_time);
             offset_changed = false;
 
-            myLogger.level(info) << "Setting up timestamp decoder with " << 
-                (modconfig.use_offset_fixed ? "fixed" : 
-                (modconfig.use_offset_file ? "dynamic" : "none")) <<
-                " offset";
+            RC_ADD_PARAMETER(offset, "TIST offset [s]");
+
+            etiLog.level(info) << "Setting up timestamp decoder with " <<
+                timestamp_offset << " offset";
 
         };
 
@@ -143,14 +138,23 @@ class TimestampDecoder
                 double pps,
                 int32_t fct);
 
-        /* Update the modulator timestamp offset according to the modconf
+        /*********** REMOTE CONTROL ***************/
+        /* virtual void enrol_at(BaseRemoteController& controller)
+         * is inherited
          */
-        bool updateModulatorOffset();
+
+        /* Base function to set parameters. */
+        virtual void set_parameter(const std::string& parameter,
+                const std::string& value);
+
+        /* Getting a parameter always returns a string. */
+        virtual const std::string get_parameter(
+                const std::string& parameter) const;
+
+        const char* name() { return "TS"; }
+
 
     protected:
-        /* Main program logger */
-        Logger& myLogger;
-
         /* Push a new MNSC field into the decoder */
         void pushMNSCData(int framephase, uint16_t mnsc);
 
@@ -170,12 +174,10 @@ class TimestampDecoder
         uint32_t time_secs;
         int32_t latestFCT;
         double time_pps;
-        double timestamp_offset;
+        double& timestamp_offset;
+        unsigned m_tist_delay_stages;
         int inhibit_second_update;
         bool offset_changed;
-
-        /* configuration for the offset management */
-        struct modulator_offset_config& modconfig;
 
         /* When the type or identifier don't match, the decoder must
          * be disabled
@@ -190,8 +192,9 @@ class TimestampDecoder
          * synchronise two modulators if only one uses (for instance) the
          * FIRFilter (1 stage pipeline)
          */
-        std::queue<struct frame_timestamp*> queue_timestamps;
+        std::queue<std::shared_ptr<struct frame_timestamp> > queue_timestamps;
 
 };
 
 #endif
+

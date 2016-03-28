@@ -49,7 +49,6 @@ void printUsage(char* progName)
             " (-f filename | -u uhddevice -F frequency) "
             " [-G txgain]"
             " [-o offset]"
-            " [-O offsetfile]"
             " [-T filter_taps_file]"
             " [-a gain]"
             " [-c clockrate]"
@@ -66,16 +65,17 @@ void printUsage(char* progName)
     fprintf(out, "-F frequency:  Set the transmit frequency when using UHD output. (mandatory option when using UHD)\n");
     fprintf(out, "-G txgain:     Set the transmit gain for the UHD driver (default: 0)\n");
     fprintf(out, "-o:            (UHD only) Set the timestamp offset added to the timestamp in the ETI. The offset is a double.\n");
-    fprintf(out, "-O:            (UHD only) Set the file containing the timestamp offset added to the timestamp in the ETI.\n"
-                                 "The file is read every six seconds, and must contain a double value.\n");
-    fprintf(out, "                  Specifying either -o or -O has two implications: It enables synchronous transmission,\n"
+    fprintf(out, "                  Specifying this option has two implications: It enables synchronous transmission,\n"
                  "                  requiring an external REFCLK and PPS signal and frames that do not contain a valid timestamp\n"
                  "                  get muted.\n\n");
     fprintf(out, "-T taps_file:  Enable filtering before the output, using the specified file containing the filter taps.\n");
     fprintf(out, "-a gain:       Apply digital amplitude gain.\n");
     fprintf(out, "-c rate:       Set the DAC clock rate and enable Cic Equalisation.\n");
     fprintf(out, "-g:            Set computation gain mode: "
-            "%u FIX, %u MAX, %u VAR\n", GAIN_FIX, GAIN_MAX, GAIN_VAR);
+            "%u FIX, %u MAX, %u VAR\n",
+            (unsigned int)GainMode::GAIN_FIX,
+            (unsigned int)GainMode::GAIN_MAX,
+            (unsigned int)GainMode::GAIN_VAR);
     fprintf(out, "-h:            Print this help.\n");
     fprintf(out, "-l:            Loop file when reach end of file.\n");
     fprintf(out, "-m mode:       Set DAB mode: (0: auto, 1-4: force).\n");

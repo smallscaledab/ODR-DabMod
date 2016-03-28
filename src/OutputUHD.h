@@ -2,7 +2,7 @@
    Copyright (C) 2005, 2006, 2007, 2008, 2009, 2010 Her Majesty the
    Queen in Right of Canada (Communications Research Center Canada)
 
-   Copyright (C) 2014
+   Copyright (C) 2014, 2015
    Matthias P. Braendli, matthias.braendli@mpb.li
 
     http://opendigitalradio.org
@@ -49,8 +49,8 @@ DESCRIPTION:
 #include <uhd/usrp/multi_usrp.hpp>
 #include <boost/thread/thread.hpp>
 #include <boost/thread/barrier.hpp>
-#include <boost/shared_ptr.hpp>
 #include <list>
+#include <memory>
 #include <string>
 
 #include "Log.h"
@@ -120,17 +120,19 @@ struct UHDWorkerData {
     // If we want to verify loss of refclk
     bool check_refclk_loss;
 
+    // If we want to check for the gps_timelock sensor
+    bool check_gpsfix;
+
+    bool gpsdo_is_ettus; // Set to false in case the ODR LEA-M8F board is used
+
     // muting set by remote control
     bool muting;
 
     // A barrier to synchronise the two threads
-    boost::shared_ptr<boost::barrier> sync_barrier;
+    std::shared_ptr<boost::barrier> sync_barrier;
 
     // What to do when the reference clock PLL loses lock
     refclk_lock_loss_behaviour_t refclk_lock_loss_behaviour;
-
-    // The common logger
-    Logger* logger;
 
     // What transmission mode we're using defines by how
     // much the FCT should increment for each
@@ -150,23 +152,42 @@ class UHDWorker {
         }
 
         void stop() {
-            uwd->running = false;
+            if (uwd) {
+                uwd->running = false;
+            }
             uhd_thread.interrupt();
             uhd_thread.join();
         }
 
     private:
-        void process();
-        void process_errhandler();
+        // Asynchronous message statistics
+        int num_underflows;
+        int num_late_packets;
 
+        bool fct_discontinuity;
+        int expected_next_fct;
+        uhd::tx_metadata_t md;
+        time_t tx_second;
+        double pps_offset;
+        double last_pps;
+
+        void print_async_metadata(const struct UHDWorkerFrameData *frame);
+
+        void handle_frame(const struct UHDWorkerFrameData *frame);
+        void tx_frame(const struct UHDWorkerFrameData *frame);
 
         struct UHDWorkerData *uwd;
         boost::thread uhd_thread;
 
         uhd::tx_streamer::sptr myTxStream;
+
+        void process();
+        void process_errhandler();
 };
 
-/* This structure is used as initial configuration for OutputUHD */
+/* This structure is used as initial configuration for OutputUHD.
+ * It must also contain all remote-controllable settings, otherwise
+ * they will get lost on a modulator restart. */
 struct OutputUHDConfig {
     std::string device;
     std::string usrpType; // e.g. b100, b200, usrp2
@@ -181,6 +202,7 @@ struct OutputUHDConfig {
     bool enableSync;
     bool muteNoTimestamps;
     unsigned dabMode;
+    unsigned maxGPSHoldoverTime;
 
     /* allowed values : auto, int, sma, mimo */
     std::string refclk_src;
@@ -193,15 +215,19 @@ struct OutputUHDConfig {
 
     /* What to do when the reference clock PLL loses lock */
     refclk_lock_loss_behaviour_t refclk_lock_loss_behaviour;
+
+    // muting can only be changed using the remote control
+    bool muting;
+
+    // static delay in microseconds
+    int staticDelayUs;
 };
 
 
 class OutputUHD: public ModOutput, public RemoteControllable {
     public:
 
-        OutputUHD(
-                const OutputUHDConfig& config,
-                Logger *logger);
+        OutputUHD(OutputUHDConfig& config);
         ~OutputUHD();
 
         int process(Buffer* dataIn, Buffer* dataOut);
@@ -227,18 +253,18 @@ class OutputUHD: public ModOutput, public RemoteControllable {
 
 
     protected:
-        Logger *myLogger;
+        OutputUHD(const OutputUHD& other);
+        OutputUHD& operator=(const OutputUHD& other);
+
         EtiReader *myEtiReader;
-        OutputUHDConfig myConf;
+        OutputUHDConfig& myConf;
         uhd::usrp::multi_usrp::sptr myUsrp;
-        boost::shared_ptr<boost::barrier> mySyncBarrier;
+        std::shared_ptr<boost::barrier> mySyncBarrier;
         UHDWorker worker;
         bool first_run;
+        bool gps_fix_verified;
         struct UHDWorkerData uwd;
         int activebuffer;
-
-        // muting can only be changed using the remote control
-        bool myMuting;
 
     private:
         // Resize the internal delay buffer according to the dabMode and
@@ -246,10 +272,31 @@ class OutputUHD: public ModOutput, public RemoteControllable {
         void SetDelayBuffer(unsigned int dabMode);
 
         // data
-        int myStaticDelayUs; // static delay in microseconds
+        // The remote-controllable static delay is in the OutputUHDConfig
         int myTFDurationMs; // TF duration in milliseconds
         std::vector<complexf> myDelayBuf;
         size_t lastLen;
+
+        // GPS Fix check variables
+        int num_checks_without_gps_fix;
+        struct timespec first_gps_fix_check;
+        struct timespec last_gps_fix_check;
+        struct timespec time_last_frame;
+        boost::packaged_task<bool> gps_fix_pt;
+        boost::unique_future<bool> gps_fix_future;
+        boost::thread gps_fix_task;
+
+        // Wait time in seconds to get fix
+        static const int initial_gps_fix_wait = 180;
+
+        // Interval for checking the GPS at runtime
+        static constexpr double gps_fix_check_interval = 10.0; // seconds
+
+        void check_gps();
+
+        void set_usrp_time();
+
+        void initial_gps_check();
 };
 
 #endif // HAVE_OUTPUT_UHD
